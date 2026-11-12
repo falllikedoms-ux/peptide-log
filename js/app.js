@@ -4,6 +4,11 @@ import {
   isScheduledOn, cyclePhase, dosesPerWeek, vialRemaining, vialAge,
   ymd, parseYmd, fmt, fmtBase, toBase, sameKind, unitsPerMl,
 } from './calc.js';
+import {
+  bpAverage, bpText, weightTrend, siteRotation, parseLabLines, labLines, labMatrix, buildSummary,
+} from './health.js';
+
+const APP = 'Dialed-In';
 
 // ---------- helpers ----------
 
@@ -14,11 +19,20 @@ const today = () => ymd(new Date());
 const nowTime = () => new Date().toTimeString().slice(0, 5);
 const S = () => store.get();
 
-const CATEGORIES = { peptide: 'Peptide', amino: 'Amino', other: 'Other' };
+const CATEGORIES = { peptide: 'Peptide', hormone: 'Hormone', sarm: 'SARM', amino: 'Amino', other: 'Other' };
 const DOSE_UNITS = ['mcg', 'mg', 'g', 'IU', 'mL', 'caps', 'tabs'];
 const VIAL_UNITS = ['mg', 'mcg', 'IU'];
 const ROUTES = ['SubQ', 'IM', 'Oral', 'Nasal', 'Topical', 'Other'];
-const SITES = ['', 'Abdomen L', 'Abdomen R', 'Thigh L', 'Thigh R', 'Deltoid L', 'Deltoid R', 'Glute L', 'Glute R', 'Other'];
+const SITES = [
+  'Abdomen upper L', 'Abdomen upper R', 'Abdomen lower L', 'Abdomen lower R',
+  'Glute L', 'Glute R', 'Ventroglute L', 'Ventroglute R', 'Thigh L', 'Thigh R', 'Deltoid L', 'Deltoid R', 'Other',
+];
+const SUBQ_ROTATION = SITES.slice(0, 4);
+const IM_ROTATION = ['Glute L', 'Glute R', 'Ventroglute L', 'Ventroglute R', 'Thigh L', 'Thigh R', 'Deltoid L', 'Deltoid R'];
+const REACTIONS = [['none', 'None'], ['redness', 'Redness'], ['itch', 'Itch'], ['swelling', 'Swelling'], ['lump', 'Lump'], ['sore', 'Sore / pain'], ['other', 'Other (see notes)']];
+const RED_FLAGS = 'Spreading redness, warmth, increasing pain, a hard painful lump or fever: get it checked.';
+// Keep a value that isn't in a list (e.g. an old site name) selectable.
+const withValue = (list, v) => (v && !list.some((x) => (Array.isArray(x) ? x[0] : x) === v) ? [...list, v] : list);
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 const compoundName = (id) => store.byId('compounds', id)?.name ?? 'Unknown';
@@ -90,20 +104,23 @@ const ui = {
   calc: { vialAmount: 5, vialUnit: 'mg', waterMl: 2, dose: 250, doseUnit: 'mcg', units: 10, targetUnits: 10, perKg: 2, weight: '', dosesPerWeek: 7 },
   historyFilter: { category: '', compoundId: '' },
   showFinished: false,
+  bodyRange: 30,
+  stackView: 'cycles',
 };
 
-const TITLES = { today: 'Today', calc: 'Calculator', history: 'History', cycles: 'Cycles', library: 'Vials & compounds' };
-const VIEWS = { today: viewToday, calc: viewCalc, history: viewHistory, cycles: viewCycles, library: viewLibrary };
+const TITLES = { today: 'Today', body: 'Body & labs', calc: 'Calculator', history: 'History', stack: 'Stack' };
+const VIEWS = { today: viewToday, body: viewBody, calc: viewCalc, history: viewHistory, stack: viewStack };
 
 function render() {
   $('#title').textContent = TITLES[ui.tab];
   $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === ui.tab));
   $('#view').innerHTML = VIEWS[ui.tab]();
   if (ui.tab === 'calc') updateCalc();
+  document.title = `${TITLES[ui.tab]} · ${APP}`;
 }
 
 function go(tab) {
-  ui.tab = tab;
+  ui.tab = VIEWS[tab] ? tab : 'today';
   try { localStorage.setItem('peptide-log-tab', tab); } catch { /* ignore */ }
   render();
   window.scrollTo(0, 0);
@@ -128,6 +145,11 @@ function scheduledItems(date) {
 function alerts() {
   const out = [];
   const t = today();
+  const recent = S().doses.filter((x) => x.reaction && x.reaction !== 'none' && x.date >= addDays(t, -2) && x.date <= t);
+  if (recent.length) {
+    const r = recent.sort((a, b) => b.date.localeCompare(a.date))[0];
+    out.push(`Site reaction logged ${esc(prettyDate(r.date).toLowerCase())} (${esc(reactionLabel(r.reaction))}${r.site ? `, ${esc(r.site)}` : ''}). ${esc(RED_FLAGS)}`);
+  }
   for (const v of S().vials) {
     if (v.finished) continue;
     const age = vialAge(v, t);
@@ -156,6 +178,8 @@ function viewToday() {
     </div>
 
     ${al.length ? `<div class="card warn">${al.map((a) => `<div>⚠ ${a}</div>`).join('')}</div>` : ''}
+
+    ${checkinCard(d)}
 
     <section>
       <h2>Scheduled</h2>
@@ -195,6 +219,7 @@ function doseRow(x) {
       <div class="grow">
         <div class="strong">${esc(c?.name ?? 'Unknown')} ${c ? `<span class="tag ${esc(c.category)}">${esc(CATEGORIES[c.category] || '')}</span>` : ''}</div>
         <div class="muted">${esc(fmt(x.amount, 3))} ${esc(x.unit)}${x.units ? ` · ${fmt(x.units, 1)} units` : ''}${x.route ? ` · ${esc(x.route)}` : ''}${x.site ? ` · ${esc(x.site)}` : ''}</div>
+        ${x.reaction && x.reaction !== 'none' ? `<div class="small warn-inline">Reaction: ${esc(reactionLabel(x.reaction))}</div>` : ''}
         ${x.notes ? `<div class="muted small">${esc(x.notes)}</div>` : ''}
       </div>
     </button>`;
@@ -213,7 +238,7 @@ function openDoseForm(dose = {}) {
   const c = store.byId('compounds', dose.compoundId) || s.compounds[0];
   const d = {
     compoundId: c.id, amount: c.defaultDose ?? '', unit: c.defaultUnit || 'mcg', route: c.route || 'SubQ',
-    date: ui.date, time: nowTime(), site: '', notes: '', vialId: '', ...dose,
+    date: ui.date, time: nowTime(), site: '', reaction: 'none', notes: '', vialId: '', ...dose,
   };
   if (isNew && !dose.vialId) {
     const v = s.vials.find((x) => !x.finished && x.compoundId === d.compoundId);
@@ -237,9 +262,11 @@ function openDoseForm(dose = {}) {
       <label>Time<input name="time" type="time" value="${esc(d.time)}"></label>
     </div>
     <div class="grid2">
-      <label>Route<select name="route">${options(ROUTES, d.route)}</select></label>
-      <label>Site<select name="site">${options(SITES, d.site)}</select></label>
+      <label>Route<select name="route" data-live="dose">${options(ROUTES, d.route)}</select></label>
+      <label>Site<select name="site">${options(withValue([['', '—'], ...SITES], d.site), d.site)}</select></label>
     </div>
+    <div class="muted small" id="site-hint"></div>
+    <label>Reaction<select name="reaction">${options(REACTIONS, d.reaction || 'none')}</select></label>
     <label>Notes<textarea name="notes" rows="2">${esc(d.notes)}</textarea></label>
   `, {
     onSubmit(f) {
@@ -248,9 +275,10 @@ function openDoseForm(dose = {}) {
       store.upsert('doses', {
         ...dose, compoundId: f.compoundId, vialId: f.vialId, amount, unit: f.unit,
         units: drawUnits(vial, amount, f.unit) ?? undefined,
-        date: f.date, time: f.time, route: f.route, site: f.site, notes: f.notes.trim(),
+        date: f.date, time: f.time, route: f.route, site: f.site, reaction: f.reaction, notes: f.notes.trim(),
       });
       toast(isNew ? 'Dose logged' : 'Dose saved');
+      if (f.reaction && f.reaction !== 'none') setTimeout(() => toast(RED_FLAGS), 2300);
     },
     onDelete: isNew ? null : () => { store.remove('doses', dose.id); toast('Dose deleted'); },
     onLive(form, changed) {
@@ -261,6 +289,18 @@ function openDoseForm(dose = {}) {
           if (cc.defaultUnit) form.unit.value = cc.defaultUnit;
           if (cc.route) form.route.value = cc.route;
         }
+      }
+      if (['init', 'compoundId', 'route'].includes(changed)) {
+        const route = form.route.value;
+        const rot = route === 'IM' ? IM_ROTATION : route === 'SubQ' ? SUBQ_ROTATION : null;
+        const hint = $('#site-hint');
+        if (rot) {
+          const others = S().doses.filter((x) => x.id !== dose.id);
+          const { rows, suggest } = siteRotation(others, SITES, form.date.value || today(), rot);
+          const last = rows.filter((r) => rot.includes(r.site) && r.days !== null).sort((a, b) => a.days - b.days)[0];
+          hint.innerHTML = `${suggest ? `Rested longest: <b>${esc(suggest)}</b>` : ''}${last ? ` · last used ${esc(last.site)} ${last.days === 0 ? 'today' : `${last.days}d ago`}` : ''}`;
+          if (isNew && suggest && (changed !== 'init' || !form.site.value)) form.site.value = suggest;
+        } else hint.textContent = '';
       }
       if (changed === 'compoundId' || changed === 'init') {
         const vials = S().vials.filter((v) => v.compoundId === form.compoundId.value && (!v.finished || v.id === d.vialId));
@@ -293,6 +333,10 @@ const CALC_MODES = [
 
 function viewCalc() {
   const c = ui.calc;
+  if (c.weight === '' || c.weight === undefined) {
+    const w = weightTrend(S().checkins).at(-1);
+    if (w) { c.weight = w.weight; c.weightUnit = S().settings.weightUnit; }
+  }
   const s = S().settings;
   const vials = S().vials.filter((v) => !v.finished && v.waterMl);
   const vialFields = `
@@ -478,6 +522,276 @@ function viewHistory() {
     <div class="actions"><button class="ghost" data-action="export-csv">Export CSV</button></div>
     <button class="fab" data-action="new-dose">+ Log dose</button>
   `;
+}
+
+
+// ---------- Daily check-in ----------
+
+const reactionLabel = (r) => (REACTIONS.find(([k]) => k === r)?.[1] ?? r);
+const SWEATS = [['', 'Not logged'], ['dry', 'Dry night'], ['sweat', 'Night sweats']];
+const wUnit = () => S().settings.weightUnit || 'lb';
+
+function checkinCard(d) {
+  const c = store.checkinFor(d);
+  if (!c) {
+    return `<button class="card row as-btn checkin empty-checkin" data-action="checkin" data-date="${d}">
+      <div class="grow"><div class="strong">Daily check-in</div><div class="muted small">Weight, blood pressure, night sweats, notes</div></div>
+      <span class="primary-pill">+ Add</span></button>`;
+  }
+  const am = bpAverage(c.readings, 'am');
+  const pm = bpAverage(c.readings, 'pm');
+  const bits = [];
+  if (c.weight) bits.push(`<div><span class="muted small">Weight</span><b>${esc(fmt(Number(c.weight), 1))}</b><span class="muted small">${esc(wUnit())}${c.fasted ? ' fasted' : ''}</span></div>`);
+  if (am) bits.push(`<div><span class="muted small">AM BP${am.n > 1 ? ` (avg of ${am.n})` : ''}</span><b>${fmt(am.sys, 1)}/${fmt(am.dia, 1)}</b><span class="muted small">${am.hr ? `${fmt(am.hr, 1)} bpm` : ''}</span></div>`);
+  if (pm) bits.push(`<div><span class="muted small">PM BP${pm.n > 1 ? ` (avg of ${pm.n})` : ''}</span><b>${fmt(pm.sys, 1)}/${fmt(pm.dia, 1)}</b><span class="muted small">${pm.hr ? `${fmt(pm.hr, 1)} bpm` : ''}</span></div>`);
+  if (c.sweat) bits.push(`<div><span class="muted small">Last night</span><b>${c.sweat === 'dry' ? 'Dry' : 'Sweats'}</b><span></span></div>`);
+  return `<button class="card as-btn checkin" data-action="checkin" data-date="${d}">
+    <div class="row"><div class="strong grow">Daily check-in</div><span class="muted small">Edit</span></div>
+    ${bits.length ? `<div class="stats">${bits.join('')}</div>` : ''}
+    ${c.notes ? `<div class="muted small">${esc(c.notes)}</div>` : ''}
+  </button>`;
+}
+
+function openCheckinForm(date) {
+  const existing = store.checkinFor(date);
+  const c = { date, weight: '', fasted: true, weightTime: '', readings: [], sweat: '', notes: '', ...(existing || {}) };
+  const slot = (period, i) => (c.readings || []).filter((r) => r.period === period)[i] || {};
+  const bpRow = (period, i, label) => {
+    const r = slot(period, i);
+    return `<div class="bp-row"><span class="bp-label">${label}</span>
+      <input name="${period}${i}sys" type="number" inputmode="numeric" min="0" placeholder="SYS" aria-label="${label} systolic" value="${esc(r.sys ?? '')}">
+      <span class="slash">/</span>
+      <input name="${period}${i}dia" type="number" inputmode="numeric" min="0" placeholder="DIA" aria-label="${label} diastolic" value="${esc(r.dia ?? '')}">
+      <input name="${period}${i}hr" type="number" inputmode="numeric" min="0" placeholder="HR" aria-label="${label} pulse" value="${esc(r.hr ?? '')}">
+    </div>`;
+  };
+  const amTime = slot('am', 0).time || (existing ? '' : (new Date().getHours() < 14 ? nowTime() : ''));
+  const pmTime = slot('pm', 0).time || (existing ? '' : (new Date().getHours() >= 14 ? nowTime() : ''));
+  openModal(`Check-in · ${prettyDate(date)}`, `
+    <div class="grid2">
+      <label>Weight (${esc(wUnit())})<input name="weight" type="number" inputmode="decimal" step="any" min="0" value="${esc(c.weight)}"></label>
+      <label>Time<input name="weightTime" type="time" value="${esc(c.weightTime || (existing ? '' : nowTime()))}"></label>
+    </div>
+    <label class="check"><input type="checkbox" name="fasted" ${c.fasted ? 'checked' : ''}> Fasted (only fasted weights count in the trend)</label>
+    <h3 class="mt">Blood pressure</h3>
+    <p class="muted small">Two readings back to back are averaged.</p>
+    <label>Morning time<input name="amTime" type="time" value="${esc(amTime)}"></label>
+    ${bpRow('am', 0, 'AM 1')}${bpRow('am', 1, 'AM 2')}
+    <label>Evening time<input name="pmTime" type="time" value="${esc(pmTime)}"></label>
+    ${bpRow('pm', 0, 'PM 1')}${bpRow('pm', 1, 'PM 2')}
+    <div class="callout" id="bp-avg" hidden></div>
+    <label>Night sweats last night<select name="sweat">${options(SWEATS, c.sweat || '')}</select></label>
+    <label>Notes <span class="muted small">(sleep, mood, sick, swelling, anything)</span><textarea name="notes" rows="3">${esc(c.notes)}</textarea></label>
+  `, {
+    onSubmit(f, form) {
+      const readings = [];
+      for (const period of ['am', 'pm']) {
+        for (const i of [0, 1]) {
+          const sys = f[`${period}${i}sys`], dia = f[`${period}${i}dia`], hr = f[`${period}${i}hr`];
+          if (sys && dia) readings.push({ period, sys: Number(sys), dia: Number(dia), hr: hr ? Number(hr) : '', time: f[`${period}Time`] || '' });
+        }
+      }
+      store.upsert('checkins', {
+        ...(existing || {}), date, weight: f.weight === '' ? '' : Number(f.weight), fasted: form.fasted.checked,
+        weightTime: f.weight === '' ? '' : f.weightTime, readings, sweat: f.sweat, notes: f.notes.trim(),
+      });
+      toast('Check-in saved');
+    },
+    onDelete: existing ? () => { store.remove('checkins', existing.id); toast('Check-in deleted'); } : null,
+    onLive: liveBp,
+  });
+  $$('.bp-row input', $('#modal-form')).forEach((el) => { el.dataset.live = 'bp'; });
+}
+
+function liveBp(form) {
+  const box = $('#bp-avg');
+  if (!box) return;
+  const parts = [];
+  for (const period of ['am', 'pm']) {
+    const rs = [0, 1].map((i) => ({ period, sys: form[`${period}${i}sys`].value, dia: form[`${period}${i}dia`].value, hr: form[`${period}${i}hr`].value }));
+    const a = bpAverage(rs);
+    if (a && a.n > 1) parts.push(`${period.toUpperCase()} average <b>${esc(bpText(a))}</b>`);
+  }
+  box.innerHTML = parts.join('<br>');
+  box.hidden = !parts.length;
+}
+
+// ---------- Body & labs ----------
+
+function lineChart({ series, height = 150, yFmt = (v) => fmt(v, 0), label }) {
+  const all = series.flatMap((s) => s.points);
+  if (new Set(all.map((p) => p.date)).size < 2) return '<p class="empty small">Log a few more days to see a trend.</p>';
+  const W = 320, H = height, L = 34, R = 8, T = 10, B = 22;
+  const dates = [...new Set(all.map((p) => p.date))].sort();
+  const t0 = parseYmd(dates[0]).getTime(), t1 = parseYmd(dates[dates.length - 1]).getTime();
+  const span = Math.max(t1 - t0, 86_400_000);
+  let lo = Math.min(...all.map((p) => p.y)), hi = Math.max(...all.map((p) => p.y));
+  const pad = Math.max((hi - lo) * 0.15, 1);
+  lo -= pad; hi += pad;
+  const x = (d) => L + ((parseYmd(d).getTime() - t0) / span) * (W - L - R);
+  const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const ticks = [lo + pad, (lo + hi) / 2, hi - pad];
+  const short = (d) => parseYmd(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  let svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">`;
+  svg += ticks.map((v) => `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="ax" x="${L - 4}" y="${y(v) + 3}" text-anchor="end">${esc(yFmt(v))}</text>`).join('');
+  svg += `<text class="ax" x="${L}" y="${H - 6}">${esc(short(dates[0]))}</text><text class="ax" x="${W - R}" y="${H - 6}" text-anchor="end">${esc(short(dates[dates.length - 1]))}</text>`;
+  for (const s of series) {
+    if (!s.points.length) continue;
+    const d = s.points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(p.y).toFixed(1)}`).join(' ');
+    svg += `<path class="${s.cls}" d="${d}"/>`;
+    if (s.dots) svg += s.points.map((p) => `<circle class="${s.cls}-dot" cx="${x(p.date).toFixed(1)}" cy="${y(p.y).toFixed(1)}" r="3"><title>${esc(short(p.date))}: ${esc(yFmt(p.y))}</title></circle>`).join('');
+  }
+  svg += '</svg>';
+  const legend = series.filter((s) => s.name).map((s) => `<span class="lg"><i class="${s.cls}-key"></i>${esc(s.name)}</span>`).join('');
+  return svg + (legend ? `<div class="legend">${legend}</div>` : '');
+}
+
+function viewBody() {
+  const s = S();
+  const t = today();
+  const since = addDays(t, -(ui.bodyRange - 1));
+  const trend = weightTrend(s.checkins).filter((p) => p.date >= since);
+  const ck = s.checkins.filter((c) => c.date >= since).sort((a, b) => a.date.localeCompare(b.date));
+  const bpDaily = (period) => ck.map((c) => ({ date: c.date, a: bpAverage(c.readings, period) })).filter((x) => x.a);
+  const am = bpDaily('am');
+  const last7 = weightTrend(s.checkins).filter((p) => p.date >= addDays(t, -6));
+  const prev7 = weightTrend(s.checkins).filter((p) => p.date >= addDays(t, -13) && p.date < addDays(t, -6));
+  const avg = (xs) => (xs.length ? xs.reduce((a, p) => a + p.weight, 0) / xs.length : null);
+  const w7 = avg(last7), wPrev = avg(prev7);
+  const bp7 = bpAverage(s.checkins.filter((c) => c.date >= addDays(t, -6)).flatMap((c) => c.readings || []));
+  const sweatsLogged = ck.filter((c) => c.sweat);
+  const dry = sweatsLogged.filter((c) => c.sweat === 'dry').length;
+
+  const rot = siteRotation(s.doses, SITES, t);
+  const rotRows = rot.rows.filter((r) => r.site !== 'Other' && (r.days !== null || SUBQ_ROTATION.includes(r.site)));
+  const sugSubq = siteRotation(s.doses, SITES, t, SUBQ_ROTATION).suggest;
+  const sugIm = siteRotation(s.doses, SITES, t, IM_ROTATION).suggest;
+  const reactions = s.doses.filter((x) => x.reaction && x.reaction !== 'none').sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+
+  const lm = labMatrix(s.labs);
+
+  return `
+    <div class="seg">${[7, 14, 30, 90].map((n) => `<button data-action="body-range" data-n="${n}" class="${ui.bodyRange === n ? 'active' : ''}">${n} days</button>`).join('')}</div>
+
+    <div class="card">
+      <div class="stats">
+        <div><span class="muted small">7-day fasted avg</span><b>${w7 ? fmt(w7, 1) : '—'}</b><span class="muted small">${w7 && wPrev ? `${w7 - wPrev >= 0 ? '+' : ''}${fmt(w7 - wPrev, 1)} vs prior week` : esc(wUnit())}</span></div>
+        <div><span class="muted small">7-day BP avg</span><b>${bp7 ? `${fmt(bp7.sys, 0)}/${fmt(bp7.dia, 0)}` : '—'}</b><span class="muted small">${bp7?.hr ? `${fmt(bp7.hr, 0)} bpm · ${bp7.n} readings` : ''}</span></div>
+        <div><span class="muted small">Dry nights</span><b>${sweatsLogged.length ? `${dry}/${sweatsLogged.length}` : '—'}</b><span class="muted small">of nights logged</span></div>
+      </div>
+    </div>
+
+    <h2>Fasted weight</h2>
+    <div class="card">${lineChart({
+      label: 'Fasted weight trend',
+      yFmt: (v) => fmt(v, 0),
+      series: [
+        { name: 'Weigh-ins', cls: 's1', dots: true, points: trend.map((p) => ({ date: p.date, y: p.weight })) },
+        { name: '7-day average', cls: 's2', points: trend.map((p) => ({ date: p.date, y: p.avg })) },
+      ],
+    })}</div>
+
+    <h2>Morning blood pressure</h2>
+    <div class="card">${lineChart({
+      label: 'Morning blood pressure',
+      series: [
+        { name: 'Systolic', cls: 's1', dots: true, points: am.map((x) => ({ date: x.date, y: x.a.sys })) },
+        { name: 'Diastolic', cls: 's3', dots: true, points: am.map((x) => ({ date: x.date, y: x.a.dia })) },
+        { name: 'Pulse', cls: 's2', points: am.filter((x) => x.a.hr).map((x) => ({ date: x.date, y: x.a.hr })) },
+      ],
+    })}</div>
+
+    <h2>Injection sites</h2>
+    <div class="card">
+      <p class="small">Next SubQ: <b>${esc(sugSubq || '—')}</b> · Next IM: <b>${esc(sugIm || '—')}</b></p>
+      <div class="sites">${rotRows.map((r) => `<div class="site ${r.days === null ? 'never' : r.days < 2 ? 'recent' : ''}"><span>${esc(r.site)}</span><b>${r.days === null ? 'never' : r.days === 0 ? 'today' : `${r.days}d`}</b></div>`).join('')}</div>
+      ${reactions.length ? `<h3 class="mt">Recent reactions</h3>${reactions.map((x) => `<div class="kv"><span>${esc(prettyDate(x.date))} · ${esc(x.site || 'site?')}</span><b>${esc(reactionLabel(x.reaction))}</b></div>`).join('')}<p class="muted small">${esc(RED_FLAGS)}</p>` : '<p class="muted small">No site reactions logged.</p>'}
+    </div>
+
+    <h2>Labs</h2>
+    ${lm.panels.length ? `<div class="card scroll-x"><table class="labs">
+      <thead><tr><th>Marker</th>${lm.panels.map((p) => `<th><button class="link" data-action="edit-lab" data-id="${p.id}">${esc(p.label || prettyDate(p.date))}</button><div class="muted small">${esc(p.date)}${p.fasted ? ' · fasted' : ''}</div></th>`).join('')}</tr></thead>
+      <tbody>${lm.rows.map((r) => `<tr><td>${esc(r.marker)} <span class="muted small">${esc(r.unit)}</span></td>${r.values.map((v) => `<td class="${v?.flag ? 'flag' : ''}">${v ? `${esc(v.cmp || '')}${esc(fmt(Number(v.value), 3))}${v.flag ? ` ${esc(v.flag)}` : ''}` : '<span class="muted">—</span>'}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table></div>` : '<p class="empty">No labs yet.</p>'}
+    <div class="actions"><button class="ghost" data-action="new-lab">+ Add lab results</button></div>
+
+    <div class="actions"><button class="primary" data-action="summary">Copy summary for Claude</button></div>
+    <button class="fab" data-action="checkin" data-date="${t}">+ Check-in</button>
+  `;
+}
+
+function openLabForm(p = {}) {
+  const isNew = !p.id;
+  const d = { date: today(), label: '', fasted: true, notes: '', results: [], ...p };
+  openModal(isNew ? 'Add lab results' : 'Edit lab results', `
+    <div class="grid2">
+      <label>Date<input name="date" type="date" required value="${esc(d.date)}"></label>
+      <label>Name <span class="muted small">(optional)</span><input name="label" value="${esc(d.label)}" placeholder="e.g. Week 8 panel"></label>
+    </div>
+    <label class="check"><input type="checkbox" name="fasted" ${d.fasted ? 'checked' : ''}> Fasted draw</label>
+    <label>Results <span class="muted small">(one per line: marker, value, unit, H/L)</span>
+      <textarea name="results" rows="10" data-live="lab" placeholder="Hct 44 %&#10;Glucose 92 mg/dL&#10;AST/ALT 22/30 U/L&#10;Estradiol 25 pg/mL">${esc(labLines(d.results))}</textarea></label>
+    <div class="callout small" id="lab-preview" hidden></div>
+    <label>Notes<textarea name="notes" rows="2" placeholder="e.g. non-fasted, afternoon draw">${esc(d.notes)}</textarea></label>
+  `, {
+    onSubmit(f, form) {
+      store.upsert('labs', { ...p, date: f.date, label: f.label.trim(), fasted: form.fasted.checked, notes: f.notes.trim(), results: parseLabLines(f.results).filter((r) => r.value !== '') });
+      toast('Labs saved');
+    },
+    onDelete: isNew ? null : () => { store.remove('labs', p.id); toast('Labs deleted'); },
+    onLive(form) {
+      const rs = parseLabLines(form.results.value);
+      const box = $('#lab-preview');
+      box.hidden = !rs.length;
+      box.innerHTML = `${rs.filter((r) => r.value !== '').length} markers read${rs.some((r) => r.value === '') ? `. Couldn't read: ${rs.filter((r) => r.value === '').map((r) => esc(r.marker)).join(', ')}` : ''}`;
+    },
+  });
+}
+
+function openSummary() {
+  const s = S();
+  const t = today();
+  const last = s.settings.lastSummaryTo;
+  const ranges = [['3', 'Last 3 days'], ['7', 'Last 7 days'], ['14', 'Last 14 days'], ['30', 'Last 30 days']];
+  if (last && last < t) ranges.unshift(['since', `Since last copy (${prettyDate(addDays(last, 1))})`]);
+  const pick = ranges[0][0];
+  const fromFor = (v) => (v === 'since' ? addDays(last, 1) : addDays(t, -(Number(v) - 1)));
+  openModal('Summary for Claude', `
+    <label>Range<select name="range" data-live="sum">${options(ranges, pick)}</select></label>
+    <label>Preview<textarea name="text" rows="12" readonly class="mono"></textarea></label>
+    <p class="muted small">Copy, then paste it into this project's chat and I'll update the tracker.</p>
+  `, {
+    submitLabel: 'Copy',
+    onSubmit(f) {
+      const text = f.text;
+      const done = () => { store.setSettings({ lastSummaryTo: t }); toast('Copied. Paste it to Claude'); };
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, () => shareText(text, done));
+      else shareText(text, done);
+    },
+    onLive(form) {
+      form.text.value = buildSummary(S(), { from: fromFor(form.range.value), to: t, appName: APP });
+    },
+  });
+  const foot = $('#modal-form .modal-foot');
+  if (navigator.share) {
+    foot.insertAdjacentHTML('afterbegin', '<button type="button" class="ghost" data-action="share-summary">Share</button>');
+  }
+}
+
+function shareText(text, done) {
+  if (navigator.share) navigator.share({ text }).then(done, () => {});
+  else { const ta = $('#modal-form textarea[name=text]'); ta?.select(); document.execCommand?.('copy'); done(); }
+}
+
+// ---------- Stack: cycles + vials + compounds ----------
+
+function viewStack() {
+  return `
+    <div class="seg">
+      <button data-action="stack-view" data-v="cycles" class="${ui.stackView === 'cycles' ? 'active' : ''}">Cycles</button>
+      <button data-action="stack-view" data-v="library" class="${ui.stackView === 'library' ? 'active' : ''}">Vials & compounds</button>
+    </div>
+    ${ui.stackView === 'cycles' ? viewCycles() : viewLibrary()}`;
 }
 
 // ---------- Cycles ----------
@@ -696,14 +1010,16 @@ function openSettings() {
     </div>
     <label>Body weight unit<select name="weightUnit">${options(['lb', 'kg'], st.weightUnit)}</select></label>
     <h3>Your data</h3>
-    <p class="muted small">Everything is stored only on this device (${s.doses.length} doses, ${s.vials.length} vials, ${s.protocols.length} cycles). Back it up now and then.</p>
+    <p class="muted small">Everything is stored only on this device (${s.doses.length} doses, ${s.checkins.length} check-ins, ${s.labs.length} lab panels, ${s.vials.length} vials, ${s.protocols.length} cycles). Back it up now and then.</p>
     <div class="actions wrap">
+      <button type="button" class="primary" data-action="summary">Copy summary for Claude</button>
       <button type="button" class="ghost" data-action="export-json">Download backup</button>
-      <label class="ghost button">Restore backup<input type="file" accept="application/json,.json" data-action="import-json" hidden></label>
+      <label class="ghost button">Add entries from file<input type="file" accept="application/json,.json" data-action="merge-json" hidden></label>
+      <label class="ghost button">Restore backup (replaces all)<input type="file" accept="application/json,.json" data-action="import-json" hidden></label>
       <button type="button" class="ghost" data-action="export-csv">Export doses CSV</button>
       <button type="button" class="danger" data-action="clear-all">Erase everything</button>
     </div>
-    <p class="disclaimer">Peptide Log is a personal record and calculator. It is not medical advice. Check every calculation before you use it.</p>
+    <p class="disclaimer">${APP} is a personal record and calculator. It is not medical advice. Check every calculation before you use it.</p>
   `, {
     submitLabel: 'Save',
     onSubmit(f) {
@@ -727,16 +1043,16 @@ function download(name, text, type) {
 
 function exportCsv() {
   const s = S();
-  const head = ['date', 'time', 'compound', 'type', 'amount', 'unit', 'syringe_units', 'route', 'site', 'vial', 'cycle', 'notes'];
+  const head = ['date', 'time', 'compound', 'type', 'amount', 'unit', 'syringe_units', 'route', 'site', 'reaction', 'vial', 'cycle', 'notes'];
   const q = (x) => `"${String(x ?? '').replace(/"/g, '""')}"`;
   const rows = [...s.doses].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).map((d) => {
     const c = store.byId('compounds', d.compoundId);
     const v = store.byId('vials', d.vialId);
     const p = store.byId('protocols', d.protocolId);
-    return [d.date, d.time, c?.name, c?.category, d.amount, d.unit, d.units != null ? fmt(d.units, 2) : '', d.route, d.site,
+    return [d.date, d.time, c?.name, c?.category, d.amount, d.unit, d.units != null ? fmt(d.units, 2) : '', d.route, d.site, d.reaction && d.reaction !== 'none' ? d.reaction : '',
       v ? `${v.amount} ${v.unit}${v.lot ? ` lot ${v.lot}` : ''}` : '', p ? protocolLabel(p) : '', d.notes].map(q).join(',');
   });
-  download(`peptide-log-${today()}.csv`, [head.join(','), ...rows].join('\n'), 'text/csv');
+  download(`dialed-in-doses-${today()}.csv`, [head.join(','), ...rows].join('\n'), 'text/csv');
 }
 
 // ---------- Modal ----------
@@ -812,6 +1128,16 @@ document.addEventListener('click', (e) => {
         route: c?.route || 'SubQ', date: ui.date, time: ui.date === today() ? nowTime() : (p.times?.[slot] || ''),
       });
     }
+    case 'checkin': return openCheckinForm(el.dataset.date || ui.date);
+    case 'body-range': ui.bodyRange = Number(el.dataset.n); return render();
+    case 'stack-view': ui.stackView = el.dataset.v; return render();
+    case 'new-lab': return openLabForm();
+    case 'edit-lab': return openLabForm({ ...store.byId('labs', id) });
+    case 'summary': return openSummary();
+    case 'share-summary': {
+      const text = $('#modal-form textarea[name=text]')?.value || '';
+      return shareText(text, () => { store.setSettings({ lastSummaryTo: today() }); closeModal(); toast('Shared'); });
+    }
     case 'new-protocol': return openProtocolForm();
     case 'edit-protocol': return openProtocolForm({ ...store.byId('protocols', id) });
     case 'new-vial': return openVialForm();
@@ -830,7 +1156,7 @@ document.addEventListener('click', (e) => {
       return openDoseForm({ amount: Number(c.dose), unit: c.doseUnit, ...(match ? { compoundId: match.compoundId, vialId: match.id } : {}) });
     }
     case 'export-csv': return exportCsv();
-    case 'export-json': return download(`peptide-log-backup-${today()}.json`, store.exportJson(), 'application/json');
+    case 'export-json': return download(`dialed-in-backup-${today()}.json`, store.exportJson(), 'application/json');
     case 'clear-all':
       if (confirm('Erase all doses, vials, cycles and compounds on this device? This cannot be undone.')) {
         store.clearAll(); closeModal(); render(); toast('Everything erased');
@@ -850,7 +1176,17 @@ document.addEventListener('click', (e) => {
 
 document.addEventListener('change', (e) => {
   const t = e.target;
+  if (t.matches('[data-action="merge-json"]') && t.files?.[0]) {
+    t.files[0].text().then((txt) => {
+      try {
+        const added = store.mergeJson(txt);
+        const parts = Object.entries(added).map(([k, n]) => `${n} ${k}`);
+        closeModal(); render(); toast(parts.length ? `Added ${parts.join(', ')}` : 'Nothing new in that file');
+      } catch (err) { alert(err.message); }
+    });
+  }
   if (t.matches('[data-action="import-json"]') && t.files?.[0]) {
+    if (!confirm('Restoring replaces everything on this device with the backup. Continue?')) { t.value = ''; return; }
     t.files[0].text().then((txt) => {
       try {
         store.importJson(txt);
@@ -887,7 +1223,8 @@ document.addEventListener('visibilitychange', () => {
 
 try {
   const saved = localStorage.getItem('peptide-log-tab');
-  if (saved && VIEWS[saved]) ui.tab = saved;
+  const old = { cycles: 'stack', library: 'stack' };
+  if (saved && VIEWS[old[saved] || saved]) ui.tab = old[saved] || saved;
 } catch { /* ignore */ }
 ui.calc.syringe = S().settings.syringe;
 ui.calc.syringeMl = String(S().settings.syringeMl);

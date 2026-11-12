@@ -1,15 +1,31 @@
 // Local-only storage. Everything lives in this browser's localStorage.
 
 const KEY = 'peptide-log-v1';
+const COLLECTIONS = ['compounds', 'vials', 'protocols', 'doses', 'checkins', 'labs'];
+
+// Same key as the old Peptide Log so existing logs carry over after the rename.
+const VERSION = 2;
 
 const empty = () => ({
-  version: 1,
+  version: VERSION,
   compounds: [],
   vials: [],
   protocols: [],
   doses: [],
-  settings: { syringe: 'U-100', syringeMl: 1, weightUnit: 'lb' },
+  checkins: [], // one per day: weight, BP readings, night sweats, notes
+  labs: [], // lab panels: date, label, fasted, notes, results[]
+  settings: { syringe: 'U-100', syringeMl: 1, weightUnit: 'lb', lastSummaryTo: '' },
 });
+
+// v1 (Peptide Log) had no checkins/labs; filling the missing arrays is the
+// whole migration. Anything unknown is kept as-is.
+function migrate(data) {
+  const base = empty();
+  const out = { ...base, ...data, settings: { ...base.settings, ...(data.settings || {}) } };
+  for (const k of COLLECTIONS) if (!Array.isArray(out[k])) out[k] = [];
+  out.version = VERSION;
+  return out;
+}
 
 let state = load();
 const listeners = new Set();
@@ -18,9 +34,7 @@ function load() {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return seed(empty());
-    const data = JSON.parse(raw);
-    const base = empty();
-    return { ...base, ...data, settings: { ...base.settings, ...(data.settings || {}) } };
+    return migrate(JSON.parse(raw));
   } catch {
     return seed(empty());
   }
@@ -51,8 +65,6 @@ export function uid() {
 
 export const get = () => state;
 export const subscribe = (fn) => listeners.add(fn);
-
-const COLLECTIONS = ['compounds', 'vials', 'protocols', 'doses'];
 
 export function upsert(collection, item) {
   if (!COLLECTIONS.includes(collection)) throw new Error(collection);
@@ -95,11 +107,40 @@ export function exportJson() {
 export function importJson(text) {
   const data = JSON.parse(text);
   if (!data || !Array.isArray(data.doses) || !Array.isArray(data.compounds)) {
-    throw new Error('That file is not a Peptide Log backup.');
+    throw new Error('That file is not a Dialed-In / Peptide Log backup.');
   }
-  const base = empty();
-  state = { ...base, ...data, settings: { ...base.settings, ...(data.settings || {}) } };
+  state = migrate(data);
   persist();
+}
+
+// Add records from a file without touching what's already here. Records whose
+// id already exists are skipped; a check-in for a day that already has one is
+// skipped too. Returns counts of what was added.
+export function mergeJson(text) {
+  const data = JSON.parse(text);
+  if (!data || typeof data !== 'object') throw new Error('That file has nothing to import.');
+  const added = {};
+  for (const k of COLLECTIONS) {
+    if (!Array.isArray(data[k])) continue;
+    const ids = new Set(state[k].map((x) => x.id));
+    const days = k === 'checkins' ? new Set(state.checkins.map((x) => x.date)) : null;
+    let n = 0;
+    for (const item of data[k]) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.id && ids.has(item.id)) continue;
+      if (days && days.has(item.date)) continue;
+      state[k].push({ ...item, id: item.id || uid() });
+      if (days) days.add(item.date);
+      n++;
+    }
+    if (n) added[k] = n;
+  }
+  persist();
+  return added;
+}
+
+export function checkinFor(date) {
+  return state.checkins.find((c) => c.date === date);
 }
 
 export function clearAll() {

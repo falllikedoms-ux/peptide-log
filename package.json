@@ -1,9 +1,9 @@
 {
-  "name": "peptide-log",
-  "version": "0.1.0",
+  "name": "dialed-in",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Offline peptide, amino and cycle log with reconstitution and dose calculators.",
+  "description": "Dialed-In: offline log for peptides, cycles, weight, BP and labs, with dose calculators.",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "start": "npx --yes serve -l 8080 ."

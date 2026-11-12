@@ -1,8 +1,8 @@
 // Offline support: cache the app shell, serve from cache, refresh in the background.
-const CACHE = 'peptide-log-v1';
+const CACHE = 'dialed-in-v2';
 const FILES = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
-  'js/app.js', 'js/calc.js', 'js/store.js',
+  'js/app.js', 'js/calc.js', 'js/store.js', 'js/health.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
