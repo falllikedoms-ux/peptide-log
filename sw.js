@@ -1,5 +1,6 @@
-// Offline support: cache the app shell, serve from cache, refresh in the background.
-const CACHE = 'dialed-in-v3';
+// Offline support. Network first (so a new version shows on the first open
+// when online), falling back to the cached copy when offline.
+const CACHE = 'dialed-in-v4';
 const FILES = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/calc.js', 'js/store.js', 'js/health.js',
@@ -20,13 +21,15 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
-  e.respondWith(
-    caches.open(CACHE).then(async (cache) => {
+  e.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    try {
+      const res = await fetch(e.request, { cache: 'no-cache' });
+      if (res.ok) cache.put(e.request, res.clone());
+      return res;
+    } catch {
       const cached = await cache.match(e.request, { ignoreSearch: true });
-      const network = fetch(e.request)
-        .then((res) => { if (res.ok) cache.put(e.request, res.clone()); return res; })
-        .catch(() => cached);
-      return cached || network;
-    }),
-  );
+      return cached || Response.error();
+    }
+  })());
 });
