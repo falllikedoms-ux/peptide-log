@@ -1,7 +1,7 @@
 {
   "name": "Dialed-In",
   "short_name": "Dialed-In",
-  "description": "Log peptides and cycles, daily weight and blood pressure, injection sites and labs. Reconstitution and dose calculators.",
+  "description": "Log peptides and protocols, daily weight and blood pressure, injection sites and labs. Reconstitution and dose calculators.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

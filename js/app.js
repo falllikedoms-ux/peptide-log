@@ -192,13 +192,13 @@ function viewToday() {
           <div class="grow">
             <div class="strong">${esc(protocolLabel(p))}</div>
             <div class="muted">${esc(fmt(p.dose))} ${esc(p.unit)}${units !== null ? ` · <b>${fmt(units, 1)} units</b>` : ''}${time ? ` · ${esc(time)}` : ''}</div>
-            ${ph.of ? `<div class="muted small">On-cycle day ${ph.day} of ${ph.of}${ph.cycleNumber > 1 ? ` (cycle ${ph.cycleNumber})` : ''}</div>` : ''}
+            ${ph.of ? `<div class="muted small">On-phase day ${ph.day} of ${ph.of}${ph.cycleNumber > 1 ? ` (round ${ph.cycleNumber})` : ''}</div>` : ''}
           </div>
           ${done
             ? `<button class="chip ok" data-action="edit-dose" data-id="${done.id}">✓ ${esc(done.time || 'Done')}</button>`
             : `<button class="primary sm" data-action="log-scheduled" data-id="${p.id}" data-slot="${slot}">Log</button>`}
         </div>`;
-      }).join('') : `<p class="empty">Nothing scheduled${S().protocols.length ? '' : '. Set up a cycle in the Cycles tab and it shows up here.'}</p>`}
+      }).join('') : `<p class="empty">Nothing scheduled${S().protocols.length ? '' : '. Set up a protocol in Stack → Protocols and it shows up here.'}</p>`}
       ${offProtocols.length ? `<p class="muted small">On break: ${offProtocols.map((p) => esc(protocolLabel(p))).join(', ')}</p>` : ''}
     </section>
 
@@ -783,25 +783,25 @@ function shareText(text, done) {
   else { const ta = $('#modal-form textarea[name=text]'); ta?.select(); document.execCommand?.('copy'); done(); }
 }
 
-// ---------- Stack: cycles + vials + compounds ----------
+// ---------- Stack: protocols + vials + compounds ----------
 
 function viewStack() {
   return `
     <div class="seg">
-      <button data-action="stack-view" data-v="cycles" class="${ui.stackView === 'cycles' ? 'active' : ''}">Cycles</button>
+      <button data-action="stack-view" data-v="cycles" class="${ui.stackView === 'cycles' ? 'active' : ''}">Protocols</button>
       <button data-action="stack-view" data-v="library" class="${ui.stackView === 'library' ? 'active' : ''}">Vials & compounds</button>
     </div>
     ${ui.stackView === 'cycles' ? viewCycles() : viewLibrary()}`;
 }
 
-// ---------- Cycles ----------
+// ---------- Protocols ----------
 
 function viewCycles() {
   const s = S();
   const t = today();
   const list = [...s.protocols].sort((a, b) => (b.active !== false) - (a.active !== false) || (a.startDate || '').localeCompare(b.startDate || ''));
   return `
-    <p class="muted">A cycle is a repeating schedule for one compound: dose, how often, and optional weeks on and off. Scheduled doses show on the Today tab.</p>
+    <p class="muted">A protocol is a repeating schedule for one compound: dose, how often, and optional weeks on and off. Scheduled doses show on the Today tab.</p>
     ${list.length ? list.map((p) => {
       const ph = cyclePhase(p, t);
       const vial = store.byId('vials', p.vialId);
@@ -825,8 +825,8 @@ function viewCycles() {
         <div class="muted">${esc(fmt(p.dose, 3))} ${esc(p.unit)} · ${esc(freqText(p))}</div>
         <div class="muted small">${p.startDate ? `From ${esc(prettyDate(p.startDate))}` : ''}${p.endDate ? ` to ${esc(prettyDate(p.endDate))}` : ''} · ${taken} logged${runout ? ` · ${runout}` : ''}</div>
       </button>`;
-    }).join('') : '<p class="empty">No cycles yet.</p>'}
-    <button class="fab" data-action="new-protocol">+ New cycle</button>
+    }).join('') : '<p class="empty">No protocols yet.</p>'}
+    <button class="fab" data-action="new-protocol">+ New protocol</button>
   `;
 }
 
@@ -839,7 +839,7 @@ function openProtocolForm(p = {}) {
     name: '', compoundId: c.id, dose: c.defaultDose ?? '', unit: c.defaultUnit || 'mcg', frequency: 'daily', everyN: 2,
     weekdays: [1, 3, 5], times: [], startDate: today(), endDate: '', weeksOn: '', weeksOff: '', vialId: '', active: true, notes: '', ...p,
   };
-  openModal(isNew ? 'New cycle' : 'Edit cycle', `
+  openModal(isNew ? 'New protocol' : 'Edit protocol', `
     <label>Compound<select name="compoundId" data-live="proto">${options(s.compounds.map((x) => [x.id, x.name]), d.compoundId)}</select></label>
     <label>Name <span class="muted small">(optional)</span><input name="name" value="${esc(d.name)}" placeholder="e.g. Healing stack AM"></label>
     <div class="grid2">
@@ -876,9 +876,9 @@ function openProtocolForm(p = {}) {
         times, startDate: f.startDate, endDate: f.endDate, weeksOn: Number(f.weeksOn) || 0, weeksOff: Number(f.weeksOff) || 0,
         vialId: f.vialId, active: form.active.checked, notes: f.notes.trim(),
       });
-      toast('Cycle saved');
+      toast('Protocol saved');
     },
-    onDelete: isNew ? null : () => { store.remove('protocols', p.id); toast('Cycle deleted'); },
+    onDelete: isNew ? null : () => { store.remove('protocols', p.id); toast('Protocol deleted'); },
     onLive(form, changed) {
       const freq = form.frequency.value;
       $$('[data-show]', form).forEach((el) => { el.hidden = el.dataset.show !== freq; });
@@ -952,7 +952,7 @@ function openCompoundForm(c = {}) {
     </div>
     <label>Route<select name="route">${options(ROUTES, d.route)}</select></label>
     <label>Notes<textarea name="notes" rows="2">${esc(d.notes)}</textarea></label>
-    ${isNew ? '' : '<p class="muted small">Deleting a compound also deletes its vials and cycles. Logged doses are kept.</p>'}
+    ${isNew ? '' : '<p class="muted small">Deleting a compound also deletes its vials and protocols. Logged doses are kept.</p>'}
   `, {
     onSubmit(f) {
       store.upsert('compounds', { ...c, name: f.name.trim(), category: f.category, defaultDose: f.defaultDose === '' ? '' : Number(f.defaultDose), defaultUnit: f.defaultUnit, route: f.route, notes: f.notes.trim() });
@@ -1010,7 +1010,7 @@ function openSettings() {
     </div>
     <label>Body weight unit<select name="weightUnit">${options(['lb', 'kg'], st.weightUnit)}</select></label>
     <h3>Your data</h3>
-    <p class="muted small">Everything is stored only on this device (${s.doses.length} doses, ${s.checkins.length} check-ins, ${s.labs.length} lab panels, ${s.vials.length} vials, ${s.protocols.length} cycles). Back it up now and then.</p>
+    <p class="muted small">Everything is stored only on this device (${s.doses.length} doses, ${s.checkins.length} check-ins, ${s.labs.length} lab panels, ${s.vials.length} vials, ${s.protocols.length} protocols). Back it up now and then.</p>
     <div class="actions wrap">
       <button type="button" class="primary" data-action="summary">Copy summary for Claude</button>
       <button type="button" class="ghost" data-action="export-json">Download backup</button>
@@ -1043,7 +1043,7 @@ function download(name, text, type) {
 
 function exportCsv() {
   const s = S();
-  const head = ['date', 'time', 'compound', 'type', 'amount', 'unit', 'syringe_units', 'route', 'site', 'reaction', 'vial', 'cycle', 'notes'];
+  const head = ['date', 'time', 'compound', 'type', 'amount', 'unit', 'syringe_units', 'route', 'site', 'reaction', 'vial', 'protocol', 'notes'];
   const q = (x) => `"${String(x ?? '').replace(/"/g, '""')}"`;
   const rows = [...s.doses].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).map((d) => {
     const c = store.byId('compounds', d.compoundId);
@@ -1158,7 +1158,7 @@ document.addEventListener('click', (e) => {
     case 'export-csv': return exportCsv();
     case 'export-json': return download(`dialed-in-backup-${today()}.json`, store.exportJson(), 'application/json');
     case 'clear-all':
-      if (confirm('Erase all doses, vials, cycles and compounds on this device? This cannot be undone.')) {
+      if (confirm('Erase all doses, check-ins, labs, vials, protocols and compounds on this device? This cannot be undone.')) {
         store.clearAll(); closeModal(); render(); toast('Everything erased');
       }
       return;
