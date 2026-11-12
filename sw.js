@@ -1,5 +1,5 @@
 // Offline support: cache the app shell, serve from cache, refresh in the background.
-const CACHE = 'dialed-in-v2';
+const CACHE = 'dialed-in-v3';
 const FILES = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/calc.js', 'js/store.js', 'js/health.js',
